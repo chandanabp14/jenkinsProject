@@ -133,25 +133,36 @@ def scheduler():
     """
     while True:
         with lock:
+            # 1. Identify all active branch-triggered jobs
             active_webhook_jobs = [j for j in list(in_progress_jobs.values()) if j.get("source") == "WEBHOOK"]
             queued_webhook_jobs = [j for j in queued_jobs if j.get("source") == "WEBHOOK"]
             
+            has_priority_work = len(active_webhook_jobs) > 0 or len(queued_webhook_jobs) > 0
+            
+            # 2. Update status for all jobs
             for job in queued_jobs:
                 job["priority_score"] = calculate_priority(job)
-                job["suspended"] = (job["source"] == "AUTO" and (active_webhook_jobs or queued_webhook_jobs))
+                # Ensure it's a clean Boolean
+                job["suspended"] = bool(job["source"] == "AUTO" and has_priority_work)
             
             for job in in_progress_jobs.values():
                 if job.get("source") == "AUTO":
-                    job["suspended"] = (active_webhook_jobs or queued_webhook_jobs)
+                    job["suspended"] = bool(has_priority_work)
             
+            # 3. Sort Queue (Webhook jobs to the top)
             queued_jobs.sort(key=lambda x: x["priority_score"], reverse=True)
 
-            # Proceed with processing
+            # 4. Processing Loop
             if len(queued_jobs) > 0:
+                # Diagnostic log (only when things are happening)
+                if has_priority_work:
+                    print(f"[SCHEDULER] 🚨 High Priority Mode: {len(queued_webhook_jobs)} queued, {len(active_webhook_jobs)} in progress.")
+
                 for job in queued_jobs[:]:
                     if job.get("suspended"):
                         continue
                         
+                    # 3s Mandatory Delay
                     if time.time() - job.get("queued_at", 0) < 3.0:
                         continue
 
@@ -163,7 +174,7 @@ def scheduler():
                         evict_target = next((j for j in in_progress_jobs.values() 
                                            if j.get("source") == "AUTO" and j.get("language") == job["language"]), None)
                         if evict_target:
-                            # Evict the AUTO job
+                            print(f"[PREEMPTION] ⚡ EVICTING automated job {evict_target['id'][:8]} to free up worker for Branch Build!")
                             worker_id = evict_target["worker"]
                             evict_target["status"] = "QUEUED"
                             evict_target["worker"] = None
@@ -171,7 +182,6 @@ def scheduler():
                             queued_jobs.append(evict_target)
                             del in_progress_jobs[evict_target["id"]]
                             
-                            # Find the worker and mark it IDLE so we can take it
                             worker = next((w for w in workers if w["id"] == worker_id), None)
                             if worker: worker["status"] = "IDLE"
 
