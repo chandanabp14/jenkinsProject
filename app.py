@@ -121,49 +121,36 @@ def run_pipeline(job_id, worker_id):
                 w["status"] = "IDLE"
 
 def scheduler():
-    """Matches queued jobs to idle workers based on Enterprise Priority.
-    Implements Global Suspension and Worker Stealing (Preemption).
-    """
+    """Matches queued jobs to idle workers. Wrapped in a crash-proof loop."""
     while True:
-        with lock:
-            # 1. Identify all active branch-triggered jobs
-            active_webhook_jobs = [j for j in list(in_progress_jobs.values()) if j.get("source") == "WEBHOOK"]
-            queued_webhook_jobs = [j for j in queued_jobs if j.get("source") == "WEBHOOK"]
-            
-            has_priority_work = len(active_webhook_jobs) > 0 or len(queued_webhook_jobs) > 0
-            
-            # 2. Update status for all jobs
-            for job in queued_jobs:
-                job["priority_score"] = calculate_priority(job)
-                # Ensure it's a clean Boolean
-                job["suspended"] = bool(job["source"] == "AUTO" and has_priority_work)
-            
-            for job in in_progress_jobs.values():
-                if job.get("source") == "AUTO":
-                    job["suspended"] = bool(has_priority_work)
-            
-            # 3. Sort Queue (Webhook jobs to the top)
-            queued_jobs.sort(key=lambda x: x["priority_score"], reverse=True)
-
-            # 4. Processing Loop
-            if len(queued_jobs) > 0:
-                # Diagnostic log (only when things are happening)
-                if has_priority_work:
-                    print(f"[SCHEDULER] 🚨 High Priority Mode: {len(queued_webhook_jobs)} queued, {len(active_webhook_jobs)} in progress.")
+        try:
+            with lock:
+                active_webhook_jobs = [j for j in list(in_progress_jobs.values()) if j.get("source") == "WEBHOOK"]
+                queued_webhook_jobs = [j for j in queued_jobs if j.get("source") == "WEBHOOK"]
+                has_priority_work = len(active_webhook_jobs) > 0 or len(queued_webhook_jobs) > 0
+                
+                for job in queued_jobs:
+                    job["priority_score"] = calculate_priority(job)
+                    job["suspended"] = bool(job["source"] == "AUTO" and has_priority_work)
+                
+                for job in in_progress_jobs.values():
+                    if job.get("source") == "AUTO":
+                        job["suspended"] = bool(has_priority_work)
+                
+                queued_jobs.sort(key=lambda x: x["priority_score"], reverse=True)
 
                 for job in queued_jobs[:]:
-                    # Webhook jobs bypass the 3s delay for instant demo
-                    if job.get("source") == "AUTO" and time.time() - job.get("queued_at", 0) < 3.0:
+                    if job.get("suspended"):
                         continue
-
-                    # Attempt to find an IDLE worker
+                        
+                    # NO DELAY for the demo - start immediately
                     worker = next((w for w in workers if w["status"] == "IDLE" and w["type"] == job["language"]), None)
                     
                     if not worker and job.get("source") == "WEBHOOK":
                         evict_target = next((j for j in in_progress_jobs.values() 
                                            if j.get("source") == "AUTO" and j.get("language") == job["language"]), None)
                         if evict_target:
-                            print(f"\n[PREEMPTION] ⚡ STEALING WORKER FROM {evict_target['id'][:8]} FOR HUMAN BUILD! 🚀")
+                            print(f"\n[PREEMPTION] ⚡ STEALING WORKER FOR {job['repo']}! 🚀")
                             worker_id = evict_target["worker"]
                             evict_target["status"] = "QUEUED"
                             evict_target["worker"] = None
@@ -174,7 +161,7 @@ def scheduler():
                             if worker: worker["status"] = "IDLE"
 
                     if worker:
-                        print(f"[SCHEDULER] ✅ Assigning {job['source']} job to {worker['id']} ({job['repo']}/{job['branch']})")
+                        print(f"[SCHEDULER] ✅ Starting {job['source']} job: {job['repo']}")
                         queued_jobs.remove(job)
                         worker["status"] = "BUSY"
                         job["status"] = "IN_PROGRESS"
@@ -185,7 +172,9 @@ def scheduler():
                         t = threading.Thread(target=run_pipeline, args=(job["id"], worker["id"]))
                         t.daemon = True
                         t.start()
-                    
+        except Exception as e:
+            print(f"[CRITICAL ERROR in Scheduler]: {e}")
+            
         time.sleep(0.5)
 
 def auto_job_generator():
