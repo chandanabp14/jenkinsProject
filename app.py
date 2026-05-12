@@ -33,12 +33,16 @@ BRANCH_WEIGHTS = {
 def calculate_priority(job):
     """Calculates priority with aggressive error handling."""
     try:
-        if job.get("source") == "AUTO":
-            return 0
-            
+        # Start with Branch Weight
         branch = str(job.get("branch", "main")).lower()
-        B = BRANCH_WEIGHTS.get(branch, 1000) # Default to 1000 for unknown branches
         
+        if job.get("source") == "AUTO":
+            # For AUTO jobs, just give them 1 point per second of wait time
+            # This keeps them below any WEBHOOK job but shows the system is active
+            W = (time.time() - job.get("queued_at", time.time())) * 1
+            return round(W, 2)
+            
+        B = BRANCH_WEIGHTS.get(branch, 1000) 
         W = (time.time() - job.get("queued_at", time.time())) * 50
         S = job.get("size", 100) / 10
         
@@ -143,14 +147,19 @@ def scheduler():
                     if job.get("suspended"):
                         continue
                         
-                    # NO DELAY for the demo - start immediately
+                    # VISIBILITY DELAY: 5s for AUTO jobs so they are seen in the queue
+                    # WEBHOOK jobs bypass this for instant execution
+                    delay = 5.0 if job.get("source") == "AUTO" else 0.0
+                    if time.time() - job.get("queued_at", 0) < delay:
+                        continue
+                        
                     worker = next((w for w in workers if w["status"] == "IDLE" and w["type"] == job["language"]), None)
                     
                     if not worker and job.get("source") == "WEBHOOK":
                         evict_target = next((j for j in in_progress_jobs.values() 
                                            if j.get("source") == "AUTO" and j.get("language") == job["language"]), None)
                         if evict_target:
-                            print(f"\n[PREEMPTION] ⚡ STEALING WORKER FOR {job['repo']}! 🚀")
+                            print(f"\n[PREEMPTION] !! STEALING WORKER FOR {job['repo']} !!")
                             worker_id = evict_target["worker"]
                             evict_target["status"] = "QUEUED"
                             evict_target["worker"] = None
@@ -161,7 +170,7 @@ def scheduler():
                             if worker: worker["status"] = "IDLE"
 
                     if worker:
-                        print(f"[SCHEDULER] ✅ Starting {job['source']} job: {job['repo']}")
+                        print(f"[SCHEDULER] OK - Starting {job['source']} job: {job['repo']}")
                         queued_jobs.remove(job)
                         worker["status"] = "BUSY"
                         job["status"] = "IN_PROGRESS"
