@@ -152,14 +152,15 @@ def scheduler():
                     delay = 5.0 if job.get("source") == "AUTO" else 0.0
                     if time.time() - job.get("queued_at", 0) < delay:
                         continue
-                        
+                                            # Attempt to find an IDLE worker that matches language
                     worker = next((w for w in workers if w["status"] == "IDLE" and w["type"] == job["language"]), None)
                     
+                    # UNIVERSAL PREEMPTION: If no matching IDLE worker, and it's a WEBHOOK job, 
+                    # steal ANY worker currently doing an AUTO job!
                     if not worker and job.get("source") == "WEBHOOK":
-                        evict_target = next((j for j in in_progress_jobs.values() 
-                                           if j.get("source") == "AUTO" and j.get("language") == job["language"]), None)
+                        evict_target = next((j for j in in_progress_jobs.values() if j.get("source") == "AUTO"), None)
                         if evict_target:
-                            print(f"\n[PREEMPTION] !! STEALING WORKER FOR {job['repo']} !!")
+                            print(f"\n[PREEMPTION] !! UNIVERSAL STEAL !! Grabbing worker {evict_target['worker']} for {job['repo']}")
                             worker_id = evict_target["worker"]
                             evict_target["status"] = "QUEUED"
                             evict_target["worker"] = None
@@ -167,7 +168,9 @@ def scheduler():
                             queued_jobs.append(evict_target)
                             del in_progress_jobs[evict_target["id"]]
                             worker = next((w for w in workers if w["id"] == worker_id), None)
-                            if worker: worker["status"] = "IDLE"
+                            if worker: 
+                                worker["status"] = "IDLE"
+                                worker["type"] = job["language"] # Dynamically re-tool the worker
 
                     if worker:
                         print(f"[SCHEDULER] OK - Starting {job['source']} job: {job['repo']}")
