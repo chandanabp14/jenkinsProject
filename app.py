@@ -21,28 +21,40 @@ workers = [
     {"id": "worker-4", "type": "c", "status": "IDLE"},
 ]
 
-# Scoring Weights
-W_TYPE = 500
-W_AGE = 2
-W_SIZE = -0.5
-W_PENALTY = 100
+# Scoring Weights (Enterprise-Grade Impact-First)
+BRANCH_WEIGHTS = {
+    "master": 10000,
+    "main": 10000,
+    "staging": 5000,
+    "dev": 2000,
+    "main2": 1000
+}
 
 def calculate_priority(job):
-    """Calculates priority based on the multi-factor scoring formula."""
-    # T: Trigger Type (WEBHOOK = 1, AUTO = 0)
-    T = 1 if job.get("source") == "WEBHOOK" else 0
+    """Calculates priority based on the Enterprise Impact formula with detailed logging."""
+    if job.get("source") == "AUTO":
+        return 0
+        
+    # Start with Branch Weight
+    branch = job.get("branch", "dev").lower()
+    B = BRANCH_WEIGHTS.get(branch, 500)
     
-    # A: Wait Time (seconds in queue)
-    A = time.time() - job.get("queued_at", time.time())
+    # W: Wait Time (Age in queue) - 50 points per second
+    W = (time.time() - job.get("queued_at", time.time())) * 50
     
-    # S: Job Size (heuristic lines of code)
-    S = job.get("size", 100)
+    # S: Change Complexity (Size)
+    S = job.get("size", 100) / 10
     
-    # R: Retry Penalty
-    R = job.get("retries", 0)
+    priority = B + W + S
     
-    # P = (W_type * T) + (W_age * A) + (W_size * S) - (W_penalty * R)
-    priority = (W_TYPE * T) + (W_AGE * A) + (W_SIZE * S) - (W_PENALTY * R)
+    # Output breakdown to terminal for presentation proof
+    print(f"\n[PRIORITY LOG] 🚀 New Evaluation for Job ID: {job['id'][:8]}...")
+    print(f"  ├─ Repo/Branch: {job['repo']} / {job['branch']}")
+    print(f"  ├─ [B] Branch Weight: {B}")
+    print(f"  ├─ [W] Wait Time Bonus: {round(W, 2)}")
+    print(f"  ├─ [S] Complexity Score: {round(S, 2)}")
+    print(f"  └─ TOTAL SCORE: {round(priority, 2)}")
+    
     return round(priority, 2)
 
 def get_stages_from_jenkinsfile(repo_name=None):
@@ -69,15 +81,28 @@ def get_stages_from_jenkinsfile(repo_name=None):
     return ["Fetch Code", "Security Scan", "Docker Build", "Push to Registry"]
 
 def run_pipeline(job_id, worker_id):
-    """Simulates job execution through stages."""
+    """Simulates job execution through stages with Preemption support."""
     with lock:
         if job_id not in in_progress_jobs:
             return
         job = in_progress_jobs[job_id]
-        # Use the stages already assigned to the job
         stages = job.get("stages_list", ["Fetch Code", "Security Scan", "Docker Build", "Push to Registry"])
 
     for stage_name in stages:
+        # Check if stage was already completed before eviction
+        if job.get("stages_status", {}).get(stage_name) == "done":
+            continue
+
+        # PREEMPTION CHECK: Wait if job is suspended
+        while True:
+            with lock:
+                # EVICTION CHECK: If I'm no longer in progress, stop the thread
+                if job_id not in in_progress_jobs:
+                    return 
+                if not in_progress_jobs[job_id].get("suspended", False):
+                    break
+            time.sleep(1) # Check every second
+
         with lock:
             if job_id in in_progress_jobs:
                 in_progress_jobs[job_id]["current_stage"] = stage_name
@@ -103,40 +128,61 @@ def run_pipeline(job_id, worker_id):
                 w["status"] = "IDLE"
 
 def scheduler():
-    """Matches queued jobs to idle workers based on priority scoring.
-    Waits until there are at least 5 jobs to demonstrate sorting logic.
+    """Matches queued jobs to idle workers based on Enterprise Priority.
+    Implements Global Suspension and Worker Stealing (Preemption).
     """
     while True:
         with lock:
-            # Calculate priority for all queued jobs and sort them
+            active_webhook_jobs = [j for j in list(in_progress_jobs.values()) if j.get("source") == "WEBHOOK"]
+            queued_webhook_jobs = [j for j in queued_jobs if j.get("source") == "WEBHOOK"]
+            
             for job in queued_jobs:
                 job["priority_score"] = calculate_priority(job)
+                job["suspended"] = (job["source"] == "AUTO" and (active_webhook_jobs or queued_webhook_jobs))
             
-            # Sort by priority score descending
+            for job in in_progress_jobs.values():
+                if job.get("source") == "AUTO":
+                    job["suspended"] = (active_webhook_jobs or queued_webhook_jobs)
+            
             queued_jobs.sort(key=lambda x: x["priority_score"], reverse=True)
 
-            # Only proceed if we have a decent number of jobs to show sorting
-            # Or if it's a webhook job (which we should process anyway)
-            has_webhook = any(j.get("source") == "WEBHOOK" for j in queued_jobs)
-            
-            if len(queued_jobs) >= 5 or has_webhook:
+            # Proceed with processing
+            if len(queued_jobs) > 0:
                 for job in queued_jobs[:]:
-                    # Still keep the 3-second visibility delay
+                    if job.get("suspended"):
+                        continue
+                        
                     if time.time() - job.get("queued_at", 0) < 3.0:
                         continue
 
-                    # Match job language to worker type
+                    # Attempt to find an IDLE worker
                     worker = next((w for w in workers if w["status"] == "IDLE" and w["type"] == job["language"]), None)
                     
+                    # WORKER STEALING: If no IDLE worker, and it's a WEBHOOK job, try to evict an AUTO job
+                    if not worker and job.get("source") == "WEBHOOK":
+                        evict_target = next((j for j in in_progress_jobs.values() 
+                                           if j.get("source") == "AUTO" and j.get("language") == job["language"]), None)
+                        if evict_target:
+                            # Evict the AUTO job
+                            worker_id = evict_target["worker"]
+                            evict_target["status"] = "QUEUED"
+                            evict_target["worker"] = None
+                            evict_target["suspended"] = True
+                            queued_jobs.append(evict_target)
+                            del in_progress_jobs[evict_target["id"]]
+                            
+                            # Find the worker and mark it IDLE so we can take it
+                            worker = next((w for w in workers if w["id"] == worker_id), None)
+                            if worker: worker["status"] = "IDLE"
+
                     if worker:
                         queued_jobs.remove(job)
                         worker["status"] = "BUSY"
                         job["status"] = "IN_PROGRESS"
                         job["worker"] = worker["id"]
-                        job["stages_status"] = {}
+                        if "stages_status" not in job: job["stages_status"] = {}
                         in_progress_jobs[job["id"]] = job
                         
-                        # Start execution in a new thread
                         t = threading.Thread(target=run_pipeline, args=(job["id"], worker["id"]))
                         t.daemon = True
                         t.start()
@@ -313,9 +359,33 @@ HTML_TEMPLATE = """
         .job:hover { transform: translateY(-2px); }
         
         /* Specialized borders */
-        .job.webhook { border-left-color: var(--webhook); }
-        .job.progress-job { border-left-color: var(--warning); }
-        .job.comp-job { border-left-color: var(--text-dim); opacity: 0.7; }
+        .job.suspended { border-left-color: #6e7681; opacity: 0.5; }
+        .suspended-label { 
+            font-size: 0.65rem; 
+            background: #f85149; 
+            color: white; 
+            padding: 2px 6px; 
+            border-radius: 4px; 
+            margin-left: 10px;
+            font-weight: bold;
+        }
+        
+        .priority-rank {
+            position: absolute;
+            top: 10px;
+            left: -15px;
+            background: var(--accent);
+            color: white;
+            width: 25px;
+            height: 25px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.8rem;
+            font-weight: bold;
+            border: 2px solid var(--bg);
+        }
         
         .job-title { font-weight: 600; margin-bottom: 5px; display: block; }
         .job-meta { font-size: 0.75rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
@@ -377,29 +447,38 @@ HTML_TEMPLATE = """
         <!-- QUEUED COLUMN -->
         <div class="col">
             <h2>Queued <span class="count">{{ queued|length }}</span></h2>
-            {% for j in queued %}
-            <div class="job {{ 'webhook' if j.source == 'WEBHOOK' else '' }}">
-                <span class="job-meta">{{ j.source }} | {{ j.language }} | Size: {{ j.size }}</span>
-                <span class="job-title">{{ j.repo }}</span>
-                <span style="font-size: 0.75rem; color: var(--accent);">Branch: <strong>{{ j.branch }}</strong></span>
-                <div style="font-size: 0.7rem; color: var(--text-dim); margin-top: 5px;">
-                    Priority Score: <strong>{{ j.priority_score }}</strong>
+            <div style="margin-left: 20px;"> <!-- Offset for rank circles -->
+                {% for j in queued %}
+                <div class="job {{ 'webhook' if j.source == 'WEBHOOK' else '' }} {{ 'suspended' if j.suspended else '' }}">
+                    <div class="priority-rank">{{ loop.index }}</div>
+                    <span class="job-meta">
+                        {{ j.source }} | {{ j.language }} 
+                        {% if j.suspended %}<span class="suspended-label">SUSPENDED</span>{% endif %}
+                    </span>
+                    <span class="job-title">{{ j.repo }}</span>
+                    <span style="font-size: 0.75rem; color: var(--accent);">Branch: <strong>{{ j.branch }}</strong></span>
+                    <div style="font-size: 0.7rem; color: var(--text-dim); margin-top: 5px;">
+                        Priority Score: <strong>{{ j.priority_score }}</strong>
+                    </div>
                 </div>
+                {% endfor %}
             </div>
-            {% endfor %}
         </div>
 
         <!-- IN PROGRESS COLUMN -->
         <div class="col">
             <h2>In Progress <span class="count">{{ progress|length }}</span></h2>
             {% for j in progress %}
-            <div class="job progress-job {{ 'webhook' if j.source == 'WEBHOOK' else '' }}">
+            <div class="job progress-job {{ 'webhook' if j.source == 'WEBHOOK' else '' }} {{ 'suspended' if j.suspended else '' }}">
                 <span class="worker-tag">{{ j.worker }}</span>
-                <span class="job-meta">{{ j.language }}</span>
+                <span class="job-meta">
+                    {{ j.language }}
+                    {% if j.suspended %}<span class="suspended-label">PREEMPTED / PAUSED</span>{% endif %}
+                </span>
                 <span class="job-title">{{ j.repo }}</span>
                 <span style="font-size: 0.75rem; color: var(--accent);">Branch: <strong>{{ j.branch }}</strong></span>
                 
-                <div class="current-stage">{{ j.current_stage }}</div>
+                <div class="current-stage">{% if j.suspended %}⏸ PAUSED at {% endif %}{{ j.current_stage }}</div>
                 
                 <div class="stages-container">
                     {% for s in j.stages_list %}
