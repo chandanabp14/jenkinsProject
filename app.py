@@ -31,31 +31,24 @@ BRANCH_WEIGHTS = {
 }
 
 def calculate_priority(job):
-    """Calculates priority based on the Enterprise Impact formula with detailed logging."""
-    if job.get("source") == "AUTO":
-        return 0
+    """Calculates priority with aggressive error handling."""
+    try:
+        if job.get("source") == "AUTO":
+            return 0
+            
+        branch = str(job.get("branch", "main")).lower()
+        B = BRANCH_WEIGHTS.get(branch, 1000) # Default to 1000 for unknown branches
         
-    # Start with Branch Weight
-    branch = job.get("branch", "dev").lower()
-    B = BRANCH_WEIGHTS.get(branch, 500)
-    
-    # W: Wait Time (Age in queue) - 50 points per second
-    W = (time.time() - job.get("queued_at", time.time())) * 50
-    
-    # S: Change Complexity (Size)
-    S = job.get("size", 100) / 10
-    
-    priority = B + W + S
-    
-    # Output breakdown to terminal for presentation proof
-    print(f"\n[PRIORITY LOG] 🚀 New Evaluation for Job ID: {job['id'][:8]}...")
-    print(f"  ├─ Repo/Branch: {job['repo']} / {job['branch']}")
-    print(f"  ├─ [B] Branch Weight: {B}")
-    print(f"  ├─ [W] Wait Time Bonus: {round(W, 2)}")
-    print(f"  ├─ [S] Complexity Score: {round(S, 2)}")
-    print(f"  └─ TOTAL SCORE: {round(priority, 2)}")
-    
-    return round(priority, 2)
+        W = (time.time() - job.get("queued_at", time.time())) * 50
+        S = job.get("size", 100) / 10
+        
+        priority = B + W + S
+        
+        print(f"\n[PRIORITY MATH] {job['repo']} ({branch}) -> B:{B} + W:{round(W,1)} + S:{round(S,1)} = {round(priority, 1)}")
+        return round(priority, 2)
+    except Exception as e:
+        print(f"[ERROR] Priority calc failed: {e}")
+        return 99999 if job.get("source") == "WEBHOOK" else 0
 
 def get_stages_from_jenkinsfile(repo_name=None):
     """Extracts stages from the specific repository's Jenkinsfile."""
@@ -159,33 +152,29 @@ def scheduler():
                     print(f"[SCHEDULER] 🚨 High Priority Mode: {len(queued_webhook_jobs)} queued, {len(active_webhook_jobs)} in progress.")
 
                 for job in queued_jobs[:]:
-                    if job.get("suspended"):
-                        continue
-                        
-                    # 3s Mandatory Delay
-                    if time.time() - job.get("queued_at", 0) < 3.0:
+                    # Webhook jobs bypass the 3s delay for instant demo
+                    if job.get("source") == "AUTO" and time.time() - job.get("queued_at", 0) < 3.0:
                         continue
 
                     # Attempt to find an IDLE worker
                     worker = next((w for w in workers if w["status"] == "IDLE" and w["type"] == job["language"]), None)
                     
-                    # WORKER STEALING: If no IDLE worker, and it's a WEBHOOK job, try to evict an AUTO job
                     if not worker and job.get("source") == "WEBHOOK":
                         evict_target = next((j for j in in_progress_jobs.values() 
                                            if j.get("source") == "AUTO" and j.get("language") == job["language"]), None)
                         if evict_target:
-                            print(f"[PREEMPTION] ⚡ EVICTING automated job {evict_target['id'][:8]} to free up worker for Branch Build!")
+                            print(f"\n[PREEMPTION] ⚡ STEALING WORKER FROM {evict_target['id'][:8]} FOR HUMAN BUILD! 🚀")
                             worker_id = evict_target["worker"]
                             evict_target["status"] = "QUEUED"
                             evict_target["worker"] = None
                             evict_target["suspended"] = True
                             queued_jobs.append(evict_target)
                             del in_progress_jobs[evict_target["id"]]
-                            
                             worker = next((w for w in workers if w["id"] == worker_id), None)
                             if worker: worker["status"] = "IDLE"
 
                     if worker:
+                        print(f"[SCHEDULER] ✅ Assigning {job['source']} job to {worker['id']} ({job['repo']}/{job['branch']})")
                         queued_jobs.remove(job)
                         worker["status"] = "BUSY"
                         job["status"] = "IN_PROGRESS"
