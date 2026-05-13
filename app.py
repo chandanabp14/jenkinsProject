@@ -48,8 +48,9 @@ def calculate_priority(job):
         S = job.get("size", 100) / 10
         
         priority = B + W + S
-        
-        print(f"\n[PRIORITY MATH] {job['repo']} ({branch}) -> B:{B} + W:{round(W,1)} + S:{round(S,1)} = {round(priority, 1)}")
+        # Sanitize repo name for terminal printing
+        safe_repo = str(job.get("repo", "Unknown")).encode('ascii', 'ignore').decode('ascii')
+        print(f"\n[PRIORITY MATH] {safe_repo} ({branch}) -> B:{B} + W:{round(W,1)} + S:{round(S,1)} = {round(priority, 1)}")
         return round(priority, 2)
     except Exception as e:
         print(f"[ERROR] Priority calc failed: {e}")
@@ -265,9 +266,9 @@ def webhook():
                 is_readme = True
                 break
     
-    display_repo = f"🚀 {repo_name}"
+    display_repo = f"[BUILD] {repo_name}"
     if is_readme:
-        display_repo = f"📝 {repo_name} (README update)"
+        display_repo = f"[DOCS] {repo_name} (README update)"
 
     job_id = str(uuid.uuid4())
     new_job = {
