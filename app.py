@@ -148,6 +148,11 @@ def scheduler():
                     job["priority_score"] = calculate_priority(job)
                     job["suspended"] = bool(job["source"] == "AUTO" and has_priority_work)
                 
+                # PREEMPTION: Pause running AUTO jobs if a human needs the workers
+                for job in in_progress_jobs.values():
+                    if job.get("source") == "AUTO":
+                        job["suspended"] = bool(has_priority_work)
+
                 priority_queue.sort(key=lambda x: x["priority_score"], reverse=True)
 
                 # 3. Assign workers from the top of the Priority Dispatch list
@@ -155,8 +160,8 @@ def scheduler():
                     if job.get("suspended"):
                         continue
                     
-                    # PRESENTATION MODE: 10s in Dispatch for full explanation
-                    dispatch_delay = 2.0 if job.get("source") == "WEBHOOK" else 10.0
+                    # PRESENTATION MODE: 10s for Bots, 0s for YOU
+                    dispatch_delay = 0.0 if job.get("source") == "WEBHOOK" else 10.0
                     if time.time() - job.get("dispatched_at", 0) < dispatch_delay:
                         continue
                         
