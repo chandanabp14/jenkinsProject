@@ -48,9 +48,12 @@ def calculate_priority(job):
         S = job.get("size", 100) / 10
         
         priority = B + W + S
-        # Sanitize repo name for terminal printing
-        safe_repo = str(job.get("repo", "Unknown")).encode('ascii', 'ignore').decode('ascii')
-        print(f"\n[PRIORITY MATH] {safe_repo} ({branch}) -> B:{B} + W:{round(W,1)} + S:{round(S,1)} = {round(priority, 1)}")
+        
+        # Only print for top jobs or humans to avoid terminal flooding
+        if job.get("source") == "WEBHOOK" or (time.time() % 5 < 0.5):
+            safe_repo = str(job.get("repo", "Unknown")).encode('ascii', 'ignore').decode('ascii')
+            print(f"  [MATH] {safe_repo[:20]:<20} | Score: {round(priority,1):<8} (B:{B} W:{round(W,1)} S:{round(S,1)})")
+            
         return round(priority, 2)
     except Exception as e:
         print(f"[ERROR] Priority calc failed: {e}")
