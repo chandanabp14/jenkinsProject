@@ -161,8 +161,8 @@ def scheduler():
                     if job.get("suspended"):
                         continue
                     
-                    # PRESENTATION MODE: 10s for Bots, 0s for YOU
-                    dispatch_delay = 0.0 if job.get("source") == "WEBHOOK" else 10.0
+                    # PRESENTATION MODE: 10s for Bots, 0.5s for Humans (Visual Verification)
+                    dispatch_delay = 0.5 if job.get("source") == "WEBHOOK" else 10.0
                     if time.time() - job.get("dispatched_at", 0) < dispatch_delay:
                         continue
                         
@@ -374,6 +374,24 @@ HTML_TEMPLATE = """
         
         /* Specialized borders */
         .job.suspended { border-left-color: #6e7681; opacity: 0.5; }
+        
+        .job.webhook { 
+            border-left: 5px solid #ffca28; 
+            background: rgba(255, 202, 40, 0.1);
+            box-shadow: 0 0 15px rgba(255, 202, 40, 0.1);
+            border-right: 1px solid #ffca28;
+        }
+        
+        .job.webhook::after {
+            content: 'PREMIUM';
+            position: absolute;
+            top: 5px;
+            right: 10px;
+            font-size: 0.6rem;
+            color: #ffca28;
+            font-weight: bold;
+            letter-spacing: 1px;
+        }
         .suspended-label { 
             font-size: 0.65rem; 
             background: #f85149; 
