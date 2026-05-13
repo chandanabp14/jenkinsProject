@@ -383,7 +383,7 @@ HTML_TEMPLATE = """
         }
         
         .job.webhook::after {
-            content: 'PREMIUM';
+            content: '*';
             position: absolute;
             top: 5px;
             right: 10px;
